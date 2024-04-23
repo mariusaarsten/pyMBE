@@ -2322,7 +2322,7 @@ class pymbe_library():
                 list_of_particles_in_residue.append(side_chain)
 
         return list_of_particles_in_residue
-
+    
     def set_particle_acidity(self, name, acidity='inert', default_charge=0, pka=None):
         """
         Sets the particle acidity if it is acidic or basic, creates `state_one` and `state_two` with the protonated and 
@@ -2359,6 +2359,7 @@ class pymbe_library():
                     self.add_value_to_df(key=('state_one','charge'),index=index,new_value=+1)
                     self.add_value_to_df(key=('state_two','charge'),index=index,new_value=0)   
         return
+        
     
     def set_reduced_units(self, unit_length=None, unit_charge=None, temperature=None):
         """
