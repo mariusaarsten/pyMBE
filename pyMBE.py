@@ -1926,7 +1926,6 @@ class pymbe_library():
         state_two = self.pd.Series (df_state_two.es_type.values,index=df_state_two.label)
         type_map  = self.pd.concat([state_one,state_two],axis=0).to_dict()
         return type_map
-
     def load_interaction_parameters(self, filename, verbose=False):
         """
         Loads the interaction parameters stored in `filename` into `pmb.df`
@@ -1937,7 +1936,7 @@ class pymbe_library():
         """
         from espressomd import interactions
         without_units = ['q','es_type','acidity']
-        with_units = ['sigma','epsilon']
+        with_units = ['sigma','epsilon','offset']
         with open(filename) as f:
             for line in f:
                 if line[0] == '#':
@@ -1961,7 +1960,8 @@ class pymbe_library():
                                     q=not_requiered_attributes.pop('q'),
                                     sigma=not_requiered_attributes.pop('sigma'),
                                     acidity=not_requiered_attributes.pop('acidity'),
-                                    epsilon=not_requiered_attributes.pop('epsilon'))
+                                    epsilon=not_requiered_attributes.pop('epsilon'),
+                                    offset=not_requiered_attributes.pop('offset'))
                 elif object_type == 'residue':
                     self.define_residue (name = param_dict.pop('name'),
                                         central_bead = param_dict.pop('central_bead_name'),
@@ -1994,7 +1994,7 @@ class pymbe_library():
                 if verbose:
                     print('Added: '+line)
         return
-    
+
     def load_pka_set(self,filename, verbose=False):
         """
         Loads the pka_set stored in `filename` into `pmb.df`.
