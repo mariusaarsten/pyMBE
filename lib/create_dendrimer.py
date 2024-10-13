@@ -29,53 +29,10 @@ class dendrimerBuilder:
 
     def define_dendrimer(self, pmb):
         """
-        Define the dendrimer structure using pyMBE functions and write to pmb.df.
-
-        Args:
-            pmb: An instance of the pyMBE class.
-
-        Returns:
-            A dictionary representing the dendrimer map.
+        Define the dendrimer structure and build the dendrimer map.
         """
-        # Define particles using pyMBE
-        pmb.define_particle(name=self.particle_inner)
-        pmb.define_particle(name=self.particle_outer)
-
-        # Define residues
-        # Central chain residues
-        for residue_name in self.central_chain_residues:
-            pmb.define_residue(
-                name=residue_name,
-                central_bead=self.particle_inner,
-                side_chains=[]
-            )
-
-        # Branch residues
-        for residue_name in self.branch_residues:
-            pmb.define_residue(
-                name=residue_name,
-                central_bead=self.particle_outer,
-                side_chains=[]
-            )
-
-        # Define the central molecule (core of the dendrimer)
-        central_molecule_name = 'central_chain_molecule'
-        pmb.define_molecule(
-            name=central_molecule_name,
-            residue_list=self.central_chain_residues
-        )
-
-        # Define branch molecules
-        branch_molecule_name = 'branch_molecule'
-        pmb.define_molecule(
-            name=branch_molecule_name,
-            residue_list=self.branch_residues
-        )
-
         # Build the dendrimer map
         dendrimer_map = {
-            'central_molecule': central_molecule_name,
-            'branch_molecule': branch_molecule_name,
             'branching_number': self.branching_number,
             'num_generations': self.num_generations,
             'structure': {}
@@ -115,8 +72,7 @@ class dendrimerBuilder:
                     # Store the relationship in branches
                     dendrimer_map['structure'][gen]['branches'].append({
                         'from_node': parent_node,
-                        'to_node': node_id,
-                        'molecule': branch_molecule_name
+                        'to_node': node_id
                     })
                     next_node_list.append(node_id)
             current_node_list = next_node_list.copy()
@@ -125,7 +81,7 @@ class dendrimerBuilder:
         self.dendrimer_map = dendrimer_map
         return dendrimer_map
 
-    def create_dendrimer(self, system, pmb, harmonic_bond, ini_pos=None, center_fixed=False):
+    def create_dendrimer(self, system, pmb, ini_pos=None, center_fixed=False):
         """
         Create the dendrimer structure in the EspressoMD system using the dendrimer map.
         """
@@ -133,9 +89,8 @@ class dendrimerBuilder:
         if self.dendrimer_map is None:
             raise ValueError("Dendrimer map is not defined. Please run define_dendrimer() first.")
 
-        # Generate type_map from pyMBE
-        type_map = pmb.get_particle_type_map()
-        bond_type = pmb.get_bond_type(harmonic_bond.name)
+        # Map particle names to type IDs
+        type_map = {'P0': 0, 'P1': 1, 'tNH': 2, 'pNH': 3}  # Adjust as needed
 
         # Set initial position to the center of the box if not provided
         if ini_pos is None:
@@ -152,30 +107,53 @@ class dendrimerBuilder:
         central_chain_nodes = []
         position = ini_pos.copy()
         direction = np.array([1, 0, 0])  # Initial direction along x-axis
-        bond_length = pmb.get_bond_length(bond_type)
 
         for node_index in self.dendrimer_map['structure'][0]['nodes']:
-            # Create a particle for the central chain node using pyMBE
-            particle_name = self.central_chain_residues[0]  # Assuming uniform residues
-            particle_type = type_map[pmb.get_particle_type(particle_name)]
+            # Get the central bead particle name from the residue
+            residue_name = self.central_chain_residues[0]  # 'Res0'
+
+            # Retrieve the central bead directly from pmb.df
+            residue_df = pmb.df[
+                (pmb.df[('pmb_type', '')] == 'residue') & 
+                (pmb.df[('name', '')] == residue_name)
+            ]
+            if not residue_df.empty:
+                particle_name = residue_df.iloc[0][('central_bead', '')]
+            else:
+                raise ValueError(f"Residue '{residue_name}' not found in pyMBE definitions.")
+
+            particle_type = type_map[particle_name]
             # Add particle to EspressoMD
             pid = system.part.add(pos=position, type=particle_type)
-            # Record particle in pmb.df
-            pmb.add_particle_to_df(pid=pid, particle_name=particle_name)
             node_ids[node_index] = pid
             central_chain_nodes.append(pid)
             node_positions[node_index] = position.copy()
             current_node_list.append(node_index)
 
             # Move to the next position along the direction
+            # Use the bond length from pyMBE
+            if len(central_chain_nodes) > 1:
+                # Find bond between previous and current particle types
+                prev_particle_name = particle_name  # Since all are the same in this case
+                bond_object = pmb.search_bond(prev_particle_name, particle_name)
+                bond_length = pmb.get_bond_length(prev_particle_name, particle_name)
+            else:
+                bond_length = pmb.units.Quantity(1.0, "nm")  # Default bond length for the first particle
+
             position += direction * bond_length.to("nm").magnitude
 
-        # Record bonds along the central chain in pmb.df
+        # Apply bonds along the central chain using pyMBE bond definitions
         for i in range(len(central_chain_nodes) - 1):
-            pmb.add_bond_in_df(
-                particle_id1=central_chain_nodes[i],
-                particle_id2=central_chain_nodes[i + 1]
-            )
+            pid1 = central_chain_nodes[i]
+            pid2 = central_chain_nodes[i + 1]
+            particle_name1 = particle_name
+            particle_name2 = particle_name
+            bond_object = pmb.search_bond(particle_name1, particle_name2)
+            if bond_object is not None:
+                bond_type_id = bond_object.type
+            else:
+                raise ValueError(f"Bond not found between {particle_name1} and {particle_name2}")
+            system.part.add_bond((bond_type, pid1, pid2))
 
         if center_fixed:
             # Fix the center node in space
@@ -188,6 +166,17 @@ class dendrimerBuilder:
                 parent_pid = node_ids[parent_node_index]
                 parent_pos = node_positions[parent_node_index]
 
+                # Get the parent particle name
+                parent_residue_name = self.central_chain_residues[0] if gen == 1 else self.branch_residues[0]
+                parent_residue_df = pmb.df[
+                    (pmb.df[('pmb_type', '')] == 'residue') & 
+                    (pmb.df[('name', '')] == parent_residue_name)
+                ]
+                if not parent_residue_df.empty:
+                    parent_particle_name = parent_residue_df.iloc[0][('central_bead', '')]
+                else:
+                    raise ValueError(f"Residue '{parent_residue_name}' not found in pyMBE definitions.")
+
                 # Generate random points on the sphere surface around the parent node using pyMBE function
                 directions = pmb.generate_random_points_in_a_sphere(
                     center=[0, 0, 0],
@@ -199,64 +188,132 @@ class dendrimerBuilder:
                 for branch_num in range(self.branching_number):
                     # Calculate new position for the branch node
                     rand_vec = directions[branch_num]
+
+                    # Get the branch particle name
+                    residue_name = self.branch_residues[0]  # 'Res1'
+                    residue_df = pmb.df[
+                        (pmb.df[('pmb_type', '')] == 'residue') & 
+                        (pmb.df[('name', '')] == residue_name)
+                    ]
+                    if not residue_df.empty:
+                        particle_name = residue_df.iloc[0][('central_bead', '')]
+                    else:
+                        raise ValueError(f"Residue '{residue_name}' not found in pyMBE definitions.")
+
+                    # Find bond between parent and branch particle types
+                    # Get the bond type from pyMBE
+                    bond_object = pmb.search_bond(parent_particle_name, particle_name)
+                    if bond_object is not None:
+                        bond_type_id = bond_object.type
+                    bond_length = pmb.get_bond_length(bond_type_id)
                     position = parent_pos + rand_vec * bond_length.to("nm").magnitude
 
-                    # Create particle for the branch node using pyMBE
-                    particle_name = self.branch_residues[0]  # Assuming uniform residues
-                    particle_type = type_map[pmb.get_particle_type(particle_name)]
+                    particle_type = type_map[particle_name]
                     pid = system.part.add(pos=position, type=particle_type)
-                    # Record particle in pmb.df
-                    pmb.add_particle_to_df(pid=pid, particle_name=particle_name)
                     node_id = max(node_ids.keys()) + 1
                     node_ids[node_id] = pid
                     node_positions[node_id] = position.copy()
                     next_node_list.append(node_id)
 
-                    # Record bond in pmb.df
-                    pmb.add_bond_in_df(
-                        particle_id1=parent_pid,
-                        particle_id2=pid
-                    )
+                    # Get the bond type from pyMBE
+                    bond_type = pmb.get_bond_type(bond_type_id)
+                    # Add bond to the EspressoMD system
+                    system.part.add_bond((bond_type, parent_pid, pid))
 
             current_node_list = next_node_list.copy()
 
-        # After all particles and bonds are recorded, add bonds to EspressoMD system
-        pmb.add_bonds_to_espresso(system)
-
         # Update the dendrimer map with particle IDs
         self.dendrimer_map['particle_ids'] = node_ids
+
+
+
 
 ###Test###
 
 pmb = pyMBE.pymbe_library(seed=42) 
 # Initialize pyMBE instance
+import espressomd
+# **1. Define Particles with LJ Parameters**
+sigma_value = pmb.units.Quantity(1.0, 'nm')    
+epsilon_value = pmb.units.Quantity(1.0, 'kJ') 
+cutoff_value = 2.5 * sigma_value
 
+pmb.define_particle(
+    name='P0',
+    z=0,
+    sigma=sigma_value,
+    epsilon=epsilon_value,
+    cutoff=cutoff_value,
+    offset=pmb.units.Quantity(0.0, 'nm')
+)
 
-# Define particle types with pyMBE
-pmb.define_particle(name='P0', z=0)
-pmb.define_particle(name='P1', z=0)
-pmb.define_particle(name='tNH', z=1)
-pmb.define_particle(name='pNH', z=1)
+pmb.define_particle(
+    name='P1',
+    z=0,
+    sigma=sigma_value,
+    epsilon=epsilon_value,
+    cutoff=cutoff_value,
+    offset=pmb.units.Quantity(0.0, 'nm')
+)
 
-# Define residues
+# Define 'tNH' and 'pNH' if they will be used
+pmb.define_particle(
+    name='tNH',
+    z=1,
+    sigma=sigma_value,
+    epsilon=epsilon_value,
+    cutoff=cutoff_value,
+    offset=pmb.units.Quantity(0.0, 'nm')
+)
+
+pmb.define_particle(
+    name='pNH',
+    z=1,
+    sigma=sigma_value,
+    epsilon=epsilon_value,
+    cutoff=cutoff_value,
+    offset=pmb.units.Quantity(0.0, 'nm')
+)
+
+# **2. Define Residues**
 pmb.define_residue(name='Res0', central_bead='P0', side_chains=[])
 pmb.define_residue(name='Res1', central_bead='P1', side_chains=[])
 
-# Define molecules
+# **3. Define Molecules**
 pmb.define_molecule(name='central_chain_molecule', residue_list=['Res0', 'Res0'])
 pmb.define_molecule(name='branch_molecule', residue_list=['Res1'])
 
-# Create an EspressoMD system
-import espressomd
-system = espressomd.System(box_l=[20, 20, 20])
+# **4. Define Bonds between Particles using define_bond**
+bond_parameters = {
+    'k': pmb.units.Quantity(1000.0, 'kJ/(nm**2)'),  # Adjust as needed
+    'r_0': pmb.units.Quantity(1.0, 'nm')
+}
 
-# Map particle names to type IDs
-type_map = {'P0': 0, 'P1': 1, 'tNH': 2, 'pNH': 3}
+# Bond between inner particles (central chain)
+particle_pairs = [('P0', 'P0')]
+pmb.define_bond(
+    bond_type='harmonic',
+    bond_parameters=bond_parameters,
+    particle_pairs=particle_pairs
+)
 
-# Map charges for functionalization
-charge_map = {'tNH': 1.0, 'pNH': 1.0}
+# Bond between inner and outer particles (branches)
+particle_pairs = [('P0', 'P1')]
+pmb.define_bond(
+    bond_type='harmonic',
+    bond_parameters=bond_parameters,
+    particle_pairs=particle_pairs
+)
 
-# Initialize the dendrimer builder
+# Bond between outer particles (if needed)
+particle_pairs = [('P1', 'P1')]
+pmb.define_bond(
+    bond_type='harmonic',
+    bond_parameters=bond_parameters,
+    particle_pairs=particle_pairs
+)
+
+# **5. Initialize the Dendrimer Builder and Define Dendrimer**
 dendrimer = dendrimerBuilder(
     particle_inner='P0',
     particle_outer='P1',
@@ -269,6 +326,14 @@ dendrimer = dendrimerBuilder(
 # Define the dendrimer structure using pyMBE
 dendrimer.define_dendrimer(pmb)
 
-# Create the dendrimer in the EspressoMD system
-dendrimer.create_dendrimer(system, pmb, harmonic_bond)
+system = espressomd.System(box_l=[20, 20, 20])
+
+# Map particle names to type IDs
+type_map = {'P0': 0, 'P1': 1, 'tNH': 2, 'pNH': 3}
+
+# Map charges for functionalization
+charge_map = {'tNH': 1.0, 'pNH': 1.0}
+
+# **7. Create the dendrimer in the EspressoMD system**
+dendrimer.create_dendrimer(system, pmb)
 
